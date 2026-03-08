@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""MFIN 7037 Assignment 2 – Extra Credit Analysis"""
+"""MFIN 7037 Assignment 2 – Extra Credit Analysis
+
+Imports shared code from Q3 and 4/common/ to avoid duplication.
+"""
+
+import sys
+from pathlib import Path
+from datetime import timedelta
 
 import pandas as pd
 import numpy as np
@@ -8,33 +15,37 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-from pathlib import Path
-from datetime import timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-DATA = Path(__file__).resolve().parent.parent / 'binance'
-FIGS = Path(__file__).resolve().parent / 'figures'
+# ── Import shared modules from teammate's Q3/Q4 code ──────────────────────
+Q34_DIR = Path(__file__).resolve().parent.parent / "Q3 and 4"
+sys.path.insert(0, str(Q34_DIR))
+
+from common.data_loader import load_daily_returns, load_perp_klines, load_funding_rates, START, RET_COL
+from common.strategy import (
+    flow_imbalance_from_perp,
+    build_universe,
+    build_panel,
+    qsort,
+    metrics,
+    run_backtest,
+    print_backtest_metrics,
+    barplot_quintile,
+    pnl_curve,
+    get_btc_returns,
+    get_eth_returns,
+)
+from common.factor_alpha import btc_alpha, crypto_proxy_alpha
+
+# ── EC-specific config ─────────────────────────────────────────────────────
+BINANCE = Path(__file__).resolve().parent.parent / "binance"
+FIGS = Path(__file__).resolve().parent / "figures"
 FIGS.mkdir(exist_ok=True)
-START = pd.Timestamp('2023-01-01')
-RET = 'ret_utc1'
 
 np.random.seed(42)
 sns.set_style('whitegrid')
 plt.rcParams.update({'font.size': 11, 'figure.dpi': 150})
-
-
-def metrics(s):
-    s = s.dropna()
-    if len(s) < 2:
-        return dict(sr=np.nan, ar=np.nan, av=np.nan, cum=np.nan, mdd=np.nan)
-    mu = s.mean() * 365
-    vol = s.std() * np.sqrt(365)
-    sr = mu / vol if vol > 0 else np.nan
-    cum = (1 + s).prod() - 1
-    eq = (1 + s).cumprod()
-    mdd = (eq / eq.cummax() - 1).min()
-    return dict(sr=sr, ar=mu, av=vol, cum=cum, mdd=mdd)
 
 
 def pmf(label, m):
@@ -43,115 +54,54 @@ def pmf(label, m):
           f"Cum={m['cum']*100:+8.1f}%  MDD={m['mdd']*100:+6.1f}%")
 
 
-def qsort(df, sig_col, ret_col='fwd', date_col='td', nq=5):
-    d = df.dropna(subset=[sig_col, ret_col]).copy()
-    d['Q'] = d.groupby(date_col)[sig_col].transform(
-        lambda x: (pd.qcut(x, nq, labels=False, duplicates='drop') + 1)
-        if len(x) >= nq else pd.Series(np.nan, index=x.index))
-    d = d.dropna(subset=['Q'])
-    d['Q'] = d['Q'].astype(int)
-    pv = (d.groupby([date_col, 'Q'])[ret_col].mean()
-          .reset_index()
-          .pivot(index=date_col, columns='Q', values=ret_col)
-          .sort_index())
-    pv.columns.name = None
-    ic = sorted(c for c in pv.columns if isinstance(c, (int, np.integer)))
-    if len(ic) >= 2:
-        pv['LS'] = pv[ic[-1]] - pv[ic[0]]
-    return pv, d
-
-
-def bar_quintile(pv, title, fn):
-    ic = sorted(c for c in pv.columns if isinstance(c, (int, np.integer)))
-    vals = [pv[c].mean() * 365 * 100 for c in ic]
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    colours = ['#c62828' if v < 0 else '#2e7d32' for v in vals]
-    ax.bar([f'Q{c}' for c in ic], vals, color=colours, edgecolor='k', lw=.5)
-    ax.axhline(0, color='k', lw=.5)
-    ax.set_ylabel('Annualised Return (%)')
-    ax.set_title(title)
-    plt.tight_layout()
-    plt.savefig(FIGS / fn, bbox_inches='tight')
-    plt.close()
-    print(f"    saved {fn}")
-
-
-def pnl_curve(pv, btc_r, title, fn):
-    fig, ax = plt.subplots(figsize=(10, 5.5))
-    cum = (1 + pv['LS']).cumprod()
-    ax.plot(cum, label='L/S (Q5-Q1)', lw=2)
-    if btc_r is not None:
-        ix = cum.index.intersection(btc_r.index)
-        if len(ix) > 0:
-            ax.plot((1 + btc_r.loc[ix]).cumprod(), label='BTC', lw=1.5, alpha=.7)
-    ax.set_ylabel('Cumulative Return (x)')
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=.3)
-    plt.tight_layout()
-    plt.savefig(FIGS / fn, bbox_inches='tight')
-    plt.close()
-    print(f"    saved {fn}")
-
-
 def main():
-    # ── Load ───────────────────────────────────────────────────────────
+    # ── Load data (reusing shared loaders) ─────────────────────────────
     print("Loading data...")
-    perp = pd.read_parquet(DATA / 'perp_klines_1h.parquet')
-    spot = pd.read_parquet(DATA / 'spot_klines_1h.parquet')
-    daily = pd.read_parquet(DATA / 'daily_returns.parquet')
-    funding = pd.read_parquet(DATA / 'funding_rates.parquet')
-    daily['date'] = pd.to_datetime(daily['date'])
-    print(f"  perp={perp.shape}  spot={spot.shape}  daily={daily.shape}")
+    daily = load_daily_returns()
+    perp = load_perp_klines()
+    spot = pd.read_parquet(BINANCE / 'spot_klines_1h.parquet')
+    funding = load_funding_rates()
+    print(f"  daily={daily.shape}  perp={perp.shape}  spot={spot.shape}")
 
-    # ── Preprocess ─────────────────────────────────────────────────────
+    # ── Preprocess: add extra features to daily ────────────────────────
     daily = daily.sort_values(['symbol', 'date'])
     daily['fi'] = daily['taker_buy_dollar_volume'] / daily['dollar_volume']
-    daily['ret_1d'] = daily.groupby('symbol')[RET].shift(1)
+    daily['ret_1d'] = daily.groupby('symbol')[RET_COL].shift(1)
     daily['ret_7d'] = (daily['close_utc1'] /
                        daily.groupby('symbol')['close_utc1'].shift(7) - 1)
     daily['log_dv'] = np.log1p(daily['dollar_volume'])
 
-    # ── Universe (top 100 by trailing 30d avg $ vol) ───────────────────
-    udf = daily[['symbol', 'date', 'dollar_volume']].copy()
-    udf = udf.sort_values(['symbol', 'date'])
-    udf['rdv'] = udf.groupby('symbol')['dollar_volume'].transform(
-        lambda x: x.rolling(30, min_periods=30).mean())
-    udf = udf.dropna(subset=['rdv'])
-    udf['rk'] = udf.groupby('date')['rdv'].rank(ascending=False, method='first')
-    univ = udf.loc[udf['rk'] <= 100, ['symbol', 'date']].copy()
-    print(f"  Universe: {univ['date'].nunique()} dates")
+    # ── Build signal, universe, panel (same as Q3) ─────────────────────
+    signal_df = flow_imbalance_from_perp(perp)
+    univ = build_universe(daily)
+    panel = build_panel(daily, signal_df, univ)
+    print(f"  Panel: {len(panel):,} rows, {panel['td'].nunique()} days")
 
-    # ── Build panel: signal_date -> trade_date = sd+1 ──────────────────
-    cols = ['symbol', 'date', 'fi', 'funding_rate_24h', 'ret_1d',
-            'ret_7d', 'log_dv', 'close_utc1', 'dollar_volume']
-    p = daily[cols].copy().rename(columns={'date': 'sd'})
-    p['td'] = p['sd'] + timedelta(days=1)
-    p = p.merge(univ, left_on=['symbol', 'sd'],
-                right_on=['symbol', 'date']).drop(columns='date')
-    rfwd = daily[['symbol', 'date', RET]].rename(
-        columns={'date': 'td', RET: 'fwd'})
-    p = p.merge(rfwd, on=['symbol', 'td'])
-    p = p[p['td'] >= START].dropna(subset=['fi', 'fwd'])
-    print(f"  Panel: {len(p):,} rows, {p['td'].nunique()} days")
+    # Enrich panel with extra daily features for EC analyses
+    feat_cols = ['symbol', 'date', 'funding_rate_24h', 'ret_1d', 'ret_7d',
+                 'log_dv', 'fi', 'close_utc1', 'dollar_volume']
+    feat = daily[feat_cols].rename(columns={'date': 'sd'})
+    panel = panel.merge(feat, on=['symbol', 'sd'], how='left', suffixes=('', '_dup'))
+    dup_cols = [c for c in panel.columns if c.endswith('_dup')]
+    panel.drop(columns=dup_cols, inplace=True)
 
-    btc = (daily.loc[daily['symbol'] == 'BTCUSDT', ['date', RET]]
-           .set_index('date')[RET].sort_index())
-    btc = btc[btc.index >= START]
+    btc = get_btc_returns(daily)
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 0: BASE STRATEGY
+    # STEP 0: BASE STRATEGY (verify matches Q3)
     # ══════════════════════════════════════════════════════════════════
     print("\n" + "=" * 70)
     print("  STEP 0: BASE STRATEGY - Perp Flow Imbalance Quintile L/S")
     print("=" * 70)
-    pv_base, det_base = qsort(p, 'fi')
+    pv_base, det_base = qsort(panel, 'flow_imbalance_1d')
     pmf('L/S (Q5-Q1)', metrics(pv_base['LS']))
     ic = sorted(c for c in pv_base.columns if isinstance(c, (int, np.integer)))
     for q in ic:
         pmf(f'Q{q}', metrics(pv_base[q]))
-    bar_quintile(pv_base, 'Perp Flow Imbalance - Quintile Returns', 'base_bar.png')
-    pnl_curve(pv_base, btc, 'L/S P&L vs BTC (from 2023)', 'base_pnl.png')
+    barplot_quintile(pv_base, 'Perp Flow Imbalance - Quintile Returns',
+                     FIGS / 'base_bar.png')
+    pnl_curve(pv_base, btc, 'L/S P&L vs BTC (from 2023)',
+              FIGS / 'base_pnl.png')
 
     melt = pv_base.loc['2026-01':'2026-03']
     if len(melt) > 5:
@@ -179,6 +129,8 @@ def main():
     sagg['fi_spot'] = sagg['tbqv'] / sagg['qv']
     sagg['td'] = sagg['sd'] + timedelta(days=1)
 
+    rfwd = daily[['symbol', 'date', RET_COL]].rename(
+        columns={'date': 'td', RET_COL: 'fwd'})
     sp = sagg[['symbol', 'sd', 'td', 'fi_spot']].merge(
         univ, left_on=['symbol', 'sd'],
         right_on=['symbol', 'date']).drop(columns='date')
@@ -188,9 +140,10 @@ def main():
     pv_spot, _ = qsort(sp, 'fi_spot')
     pmf('Spot L/S', metrics(pv_spot['LS']))
     pmf('Perp L/S (recap)', metrics(pv_base['LS']))
-    bar_quintile(pv_spot, 'Spot Flow Imbalance - Quintile Returns',
-                 'ec1_spot_bar.png')
-    pnl_curve(pv_spot, btc, 'Spot L/S vs BTC', 'ec1_spot_pnl.png')
+    barplot_quintile(pv_spot, 'Spot Flow Imbalance - Quintile Returns',
+                     FIGS / 'ec1_spot_bar.png')
+    pnl_curve(pv_spot, btc, 'Spot L/S vs BTC',
+              FIGS / 'ec1_spot_pnl.png')
     del sc, sagg, sp
 
     # ══════════════════════════════════════════════════════════════════
@@ -202,7 +155,6 @@ def main():
     print("  Binance futures: 0.02% maker / 0.04% taker")
     print("  Round-trip per leg ~8 bps; L/S two legs ~16 bps max")
 
-    # Estimate turnover
     long_q = det_base['Q'].max()
     short_q = det_base['Q'].min()
     long_by_day = det_base[det_base['Q'] == long_q].groupby('td')['symbol'].apply(set)
@@ -210,12 +162,10 @@ def main():
     dates_sorted = sorted(long_by_day.index)
     turn_l, turn_s = [], []
     for i in range(1, len(dates_sorted)):
-        pl = long_by_day.iloc[i - 1]
-        cl = long_by_day.iloc[i]
+        pl, cl = long_by_day.iloc[i - 1], long_by_day.iloc[i]
         if len(cl) > 0:
             turn_l.append(len(pl.symmetric_difference(cl)) / (2 * max(len(cl), 1)))
-        ps = short_by_day.iloc[i - 1]
-        cs = short_by_day.iloc[i]
+        ps, cs = short_by_day.iloc[i - 1], short_by_day.iloc[i]
         if len(cs) > 0:
             turn_s.append(len(ps.symmetric_difference(cs)) / (2 * max(len(cs), 1)))
     avg_turn = (np.mean(turn_l) + np.mean(turn_s)) / 2
@@ -257,9 +207,9 @@ def main():
     avg100 = avg100.dropna()
     print(f"  Top-100 threshold (Binance): ${thr.mean():,.0f}/day")
     print(f"  Top-100 average (Binance):   ${avg100.mean():,.0f}/day")
-    print(f"  Binance ~ 37-45% global derivatives volume")
-    print(f"  => 100th crypto globally:  ~${thr.mean()/0.40:,.0f}/day")
-    print(f"  => Average top-100 global: ~${avg100.mean()/0.40:,.0f}/day")
+    print(f"  Binance ~ 29-39% global derivatives volume (CoinGlass 2025-26)")
+    print(f"  => 100th crypto globally:  ~${thr.mean()/0.35:,.0f}/day")
+    print(f"  => Average top-100 global: ~${avg100.mean()/0.35:,.0f}/day")
     print(f"  US mid-cap stock: ~$20-200M/day for comparison")
 
     # ══════════════════════════════════════════════════════════════════
@@ -287,7 +237,7 @@ def main():
 
     print("\n  Granularity comparison:")
     for nq, lab in [(3, 'Tercile'), (5, 'Quintile'), (10, 'Decile')]:
-        pv_g, _ = qsort(p, 'fi', nq=nq)
+        pv_g, _ = qsort(panel, 'flow_imbalance_1d', nq=nq)
         if 'LS' in pv_g.columns:
             pmf(f'{lab} L/S (n={nq})', metrics(pv_g['LS']))
 
@@ -311,8 +261,8 @@ def main():
     print("\n" + "=" * 70)
     print("  EC5: DOUBLE SORT - Flow Imbalance x Funding Rate")
     print("=" * 70)
-    ds = p.dropna(subset=['fi', 'funding_rate_24h', 'fwd']).copy()
-    ds['Q_fi'] = ds.groupby('td')['fi'].transform(
+    ds = panel.dropna(subset=['flow_imbalance_1d', 'funding_rate_24h', 'fwd']).copy()
+    ds['Q_fi'] = ds.groupby('td')['flow_imbalance_1d'].transform(
         lambda x: pd.qcut(x, 5, labels=False, duplicates='drop') + 1
         if len(x) >= 5 else pd.Series(np.nan, index=x.index))
     ds['Q_fr'] = ds.groupby('td')['funding_rate_24h'].transform(
@@ -361,7 +311,7 @@ def main():
         print("  LightGBM unavailable, using sklearn GradientBoosting")
 
     feats = ['fi', 'ret_1d', 'ret_7d', 'funding_rate_24h', 'log_dv']
-    mldf = p.dropna(subset=feats + ['fwd']).copy().sort_values('td')
+    mldf = panel.dropna(subset=feats + ['fwd']).copy().sort_values('td')
     for f in feats:
         mldf[f'{f}_rk'] = mldf.groupby('td')[f].rank(pct=True)
     frk = [f'{f}_rk' for f in feats]
@@ -397,8 +347,10 @@ def main():
         pv_ml, _ = qsort(oos, 'pred')
         pmf('ML L/S', metrics(pv_ml['LS']))
         pmf('Base L/S (recap)', metrics(pv_base['LS']))
-        bar_quintile(pv_ml, 'ML Model - Quintile Returns', 'ec6_ml_bar.png')
-        pnl_curve(pv_ml, btc, 'ML L/S vs BTC', 'ec6_ml_pnl.png')
+        barplot_quintile(pv_ml, 'ML Model - Quintile Returns',
+                         FIGS / 'ec6_ml_bar.png')
+        pnl_curve(pv_ml, btc, 'ML L/S vs BTC',
+                  FIGS / 'ec6_ml_pnl.png')
 
         imp = pd.Series(last_model.feature_importances_,
                         index=feats).sort_values()
@@ -412,7 +364,6 @@ def main():
         print("    saved ec6_importance.png")
     else:
         print("  No OOS predictions generated.")
-        pv_ml = None
 
     # ══════════════════════════════════════════════════════════════════
     # EC7: WASH TRADING
@@ -428,7 +379,6 @@ def main():
     wt['cv'] = wt['std_qv'] / wt['mean_qv']
     wt['vol_per_trade'] = wt['mean_qv'] / wt['mean_tc']
 
-    # Vectorised first-digit extraction for Benford's Law
     pv_temp = perp[['symbol', 'quote_volume']].copy()
     pv_temp = pv_temp[pv_temp['quote_volume'] > 0]
     lv = np.log10(pv_temp['quote_volume'].values)

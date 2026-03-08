@@ -1,6 +1,11 @@
 # Data files (too large for git)
 binance/
 
+# Virtual env (recreate with pip install -r requirements.txt)
+.venv/
+venv/
+env/
+
 # Presentation slides (local only)
 slides/
 

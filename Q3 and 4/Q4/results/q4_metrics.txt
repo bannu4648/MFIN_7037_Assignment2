@@ -1,0 +1,3 @@
+L/S,"{'sr': np.float64(0.47678393631786664), 'ar': np.float64(0.2777180153368082), 'av': np.float64(0.582481904658081), 'cum': np.float64(0.3835482577507001), 'mdd': np.float64(-0.651743012465573)}"
+BTC Alpha Regression,"{'alpha': np.float64(0.0009401936161183772), 'beta': np.float64(-0.12105376068071001), 'alpha_ann': np.float64(0.34317066988320766), 't_alpha': np.float64(1.0174769819415004), 'r2': np.float64(0.00965657921977725)}"
+Q4 Crypto Proxy FF5 regression (BTC + ETH + MktRF),"{'alpha': np.float64(0.0008167444250700437), 'alpha_ann': np.float64(0.29811171515056595), 'betas': {'BTC': 0.055655361985093105, 'ETH': -0.13139278589156117, 'MktRF': -0.02159772655621396}, 't_alpha': np.float64(0.8851539134593217), 'r2': np.float64(0.020124222760869004)}"
